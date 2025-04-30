@@ -363,86 +363,56 @@ pub(crate) fn reviews_for_fsrs(
     ignore_revlogs_before: TimestampMillis,
 ) -> Option<ReviewsForFsrs> {
     let mut first_of_last_learn_entries = None;
-    let mut first_user_grade_idx = None;
-    let mut revlogs_complete = false;
+    let mut first_user_grade_after_cutoff = None;
     // Working backwards from the latest review...
     for (index, entry) in entries.iter().enumerate().rev() {
         if entry.review_kind == RevlogReviewKind::Filtered && entry.ease_factor == 0 {
             continue;
         }
-        // For incomplete review histories, initial memory state is based on the first
-        // user-graded review after the cutoff date with interval >= 1d.
-        let within_cutoff = entry.id.0 > ignore_revlogs_before.0;
         let user_graded = matches!(entry.button_chosen, 1..=4);
-        let interday = entry.interval >= 1 || entry.interval <= -86400;
-        if user_graded && within_cutoff && interday {
-            first_user_grade_idx = Some(index);
+
+        if !training {
+            // Outside of training mode, we return an incomplete review history if it has at
+            // least one user grade with a >= 1d interval. The initial memory state is based
+            // on the last such review before the cutoff date, if there is one, or the first
+            // after the cutoff if not.
+            let interday = entry.interval >= 1 || entry.interval <= -86400;
+            if user_graded && interday {
+                let after_cutoff = entry.id.0 > ignore_revlogs_before.0;
+                if after_cutoff {
+                    first_user_grade_after_cutoff = Some(index);
+                }
+            }
         }
 
+        // If the history starts with learning steps, we consider it complete.
         if user_graded && entry.review_kind == RevlogReviewKind::Learning {
             first_of_last_learn_entries = Some(index);
-            revlogs_complete = true;
+        // Ignore entries before a reset.
         } else if matches!(
             (entry.review_kind, entry.ease_factor),
             (RevlogReviewKind::Manual, 0)
         ) {
-            // Ignore entries prior to a `Reset` if a learning step has come after,
-            // but consider revlogs complete.
-            if first_of_last_learn_entries.is_some() {
-                revlogs_complete = true;
-                break;
-            // Ignore entries prior to a `Reset` if the user has graded a card
-            // after the reset.
-            } else if first_user_grade_idx.is_some() {
-                revlogs_complete = false;
-                break;
-            // User has not graded the card since it was reset, so all history
-            // filtered out.
-            } else {
-                return None;
-            }
+            break;
         // Previous versions of Anki didn't add a revlog entry when the card was
-        // reset.
+        // reset. Ignore non-learning entries before the more recent learning
+        // steps.
         } else if first_of_last_learn_entries.is_some() {
             break;
         }
     }
-    if training {
-        // While training, ignore the entire card if the first learning step of the last
-        // group of learning steps is before the ignore_revlogs_before date
-        if let Some(idx) = first_of_last_learn_entries {
-            if entries[idx].id.0 < ignore_revlogs_before.0 {
-                return None;
-            }
-        }
-    } else {
-        // While reviewing, if the first learning step is before the ignore date,
-        // we ignore it, and will fall back on SM2 info and the last user grade below.
-        if let Some(idx) = first_of_last_learn_entries {
-            if entries[idx].id.0 < ignore_revlogs_before.0 && idx < entries.len() - 1 {
-                revlogs_complete = false;
-                first_of_last_learn_entries = None;
-            }
-        }
-    }
+
+    // If the first learning step is before the cutoff, ignore it and fall back to
+    // the initial user grade below.
     if let Some(idx) = first_of_last_learn_entries {
-        // start from the learning step
-        if idx > 0 {
-            entries.drain(..idx);
+        if entries[idx].id.0 < ignore_revlogs_before.0 {
+            first_of_last_learn_entries = None;
         }
-    } else if training {
-        // when training, we ignore cards that don't have any learning steps
-        return None;
-    } else if let Some(idx) = first_user_grade_idx {
-        // if there are no learning entries, but the user has reviewed the card,
-        // we ignore all entries before the first grade
-        if idx > 0 {
-            entries.drain(..idx);
-        }
-    } else {
-        // if no valid user grades were found, ignore the card.
-        return None;
     }
+
+    // Ignore entries before the first learning step or valid user grade.
+    let start = first_of_last_learn_entries.or(first_user_grade_after_cutoff)?;
+    entries.drain(..start);
 
     // Filter out unwanted entries
     entries.retain(|entry| {
@@ -489,7 +459,7 @@ pub(crate) fn reviews_for_fsrs(
     } else {
         Some(ReviewsForFsrs {
             fsrs_items: items,
-            revlogs_complete,
+            revlogs_complete: first_of_last_learn_entries.is_some(),
             filtered_revlogs: entries,
         })
     }
