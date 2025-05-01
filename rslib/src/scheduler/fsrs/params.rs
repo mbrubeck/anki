@@ -364,6 +364,7 @@ pub(crate) fn reviews_for_fsrs(
 ) -> Option<ReviewsForFsrs> {
     let mut first_of_last_learn_entries = None;
     let mut first_user_grade_after_cutoff = None;
+    let mut last_user_grade_before_cutoff = None;
     // Working backwards from the latest review...
     for (index, entry) in entries.iter().enumerate().rev() {
         if entry.review_kind == RevlogReviewKind::Filtered && entry.ease_factor == 0 {
@@ -381,6 +382,8 @@ pub(crate) fn reviews_for_fsrs(
                 let after_cutoff = entry.id.0 > ignore_revlogs_before.0;
                 if after_cutoff {
                     first_user_grade_after_cutoff = Some(index);
+                } else if last_user_grade_before_cutoff.is_none() {
+                    last_user_grade_before_cutoff = Some(index);
                 }
             }
         }
@@ -411,7 +414,9 @@ pub(crate) fn reviews_for_fsrs(
     }
 
     // Ignore entries before the first learning step or valid user grade.
-    let start = first_of_last_learn_entries.or(first_user_grade_after_cutoff)?;
+    let start = first_of_last_learn_entries
+        .or(last_user_grade_before_cutoff)
+        .or(first_user_grade_after_cutoff)?;
     entries.drain(..start);
 
     // Filter out unwanted entries
@@ -630,6 +635,7 @@ pub(crate) mod tests {
                     revlog(RevlogReviewKind::Learning, 10),
                     RevlogEntry {
                         ease_factor: 0,
+                        button_chosen: 0,
                         ..revlog(RevlogReviewKind::Manual, 7)
                     },
                     revlog(RevlogReviewKind::Learning, 4),
@@ -745,7 +751,6 @@ pub(crate) mod tests {
     #[test]
     fn skip_initial_relearning_steps() {
         let revlogs = &[
-            revlog(RevlogReviewKind::Review, 10),
             RevlogEntry {
                 button_chosen: 1, // Again
                 interval: -600,
@@ -757,9 +762,14 @@ pub(crate) mod tests {
         // | = Ignore before
         // A = Again
         // X = Relearning
-        // R | A X R
+        // | A X R
         assert_eq!(
             convert_ignore_before(revlogs, false, days_ago_ms(9)),
+            fsrs_items!([review(0)], [review(0), review(2)])
+        );
+        // A X | R
+        assert_eq!(
+            convert_ignore_before(revlogs, false, days_ago_ms(7)),
             fsrs_items!([review(0)], [review(0), review(2)])
         );
     }
@@ -767,7 +777,10 @@ pub(crate) mod tests {
     #[test]
     fn ignore_before_date_between_learning_steps_when_reviewing() {
         let revlogs = &[
-            revlog(RevlogReviewKind::Learning, 10),
+            RevlogEntry {
+                interval: -600,
+                ..revlog(RevlogReviewKind::Learning, 10)
+            },
             revlog(RevlogReviewKind::Learning, 8),
             revlog(RevlogReviewKind::Review, 2),
         ];
@@ -796,9 +809,9 @@ pub(crate) mod tests {
             revlog(RevlogReviewKind::Review, 8),
             revlog(RevlogReviewKind::Review, 6),
         ];
-        // R | R R
+        // R R | R
         assert_eq!(
-            convert_ignore_before(revlogs, false, days_ago_ms(9))
+            convert_ignore_before(revlogs, false, days_ago_ms(7))
                 .unwrap()
                 .len(),
             2
@@ -812,6 +825,9 @@ pub(crate) mod tests {
             revlog(RevlogReviewKind::Review, 6),
         ];
         // L R |
-        assert_eq!(convert_ignore_before(revlogs, false, days_ago_ms(4)), None);
+        assert_eq!(
+            convert_ignore_before(revlogs, false, days_ago_ms(4)),
+            fsrs_items!([review(0)])
+        );
     }
 }
